@@ -1,0 +1,14 @@
+{
+  "name": "ubc-payment-verify",
+  "version": "1.0.0",
+  "description": "UBC Youth Camp Paystack Verification",
+  "main": "src/main.js",
+  "type": "module",
+  "dependencies": {
+    "node-appwrite": "^14.1.0"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "start": "node src/main.js"
+  }
+}
