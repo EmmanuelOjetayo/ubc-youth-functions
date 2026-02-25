@@ -16,16 +16,18 @@ export default async function (context) {
 
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    
     // Support both Frontend call and Paystack Webhook traffic
     const reference = body.reference || body.data?.reference;
-    const camperId = body.camperId || body.data?.metadata?.camper_id;
+    // Extract camperId from body or from Paystack's nested metadata
+    const camperId = body.camperId || body.data?.metadata?.custom_fields?.find(f => f.variable_name === 'camper_id')?.value;
 
     if (!reference || !camperId) {
+       log("Error: Missing reference or camperId in request");
        return res.json({ success: false, message: "Missing reference or camperId" }, 400);
     }
 
-    // --- TRAFFIC & DUPLICATE PROTECTION ---
-    // 1. Check if this payment was ALREADY processed (Prevents double-counting)
+    // --- 1. DUPLICATE PROTECTION ---
     const existingPayment = await databases.listDocuments(
       process.env.DATABASE_ID,
       process.env.PAYMENTS_COLLECTION,
@@ -37,61 +39,68 @@ export default async function (context) {
       return res.json({ success: true, message: "Already processed" });
     }
 
-    // 2. VERIFY WITH PAYSTACK
+    // --- 2. VERIFY WITH PAYSTACK ---
     const paystackRes = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
       headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` }
     });
     const paystackData = await paystackRes.json();
 
     if (!paystackData.status || paystackData.data.status !== 'success') {
+      error(`Paystack verification failed for ref: ${reference}`);
       return res.json({ success: false, message: "Payment verification failed" }, 400);
     }
 
-    const rawAmount = paystackData.data.amount / 100; 
+    // --- 3. NET DROP CALCULATION ---
+    // Gross Amount (what user paid) - Fees (what Paystack took) = Net (what hits your bank)
+    const grossInKobo = paystackData.data.amount;
+    const feesInKobo = paystackData.data.fees;
+    const netAmountDrops = (grossInKobo - feesInKobo) / 100; // Convert Kobo to Naira
 
-    // 3. FETCH CAMPER & UPDATE
+    // --- 4. FETCH CAMPER & UPDATE BALANCE ---
     const camper = await databases.getDocument(process.env.DATABASE_ID, process.env.CAMPERS_COLLECTION, camperId);
-    const newBalance = parseFloat(camper.amount_paid || 0) + rawAmount;
+    
+    // Use netAmountDrops for the wallet balance
+    const newBalance = parseFloat(camper.amount_paid || 0) + netAmountDrops;
 
     let updatePayload = {
         amount_paid: newBalance,
         status: newBalance >= TARGET_FEE ? 'paid' : 'pending'
     };
 
-    // 4. LOGISTICS ASSIGNMENT (Only if fully paid and not yet assigned)
+    // --- 5. LOGISTICS ASSIGNMENT (Syncing logic) ---
     if (newBalance >= TARGET_FEE && !camper.team) {
-        // Query only "paid" users to calculate next index
+        // Count how many people have reached the TARGET_FEE already
         const globalPaid = await databases.listDocuments(process.env.DATABASE_ID, process.env.CAMPERS_COLLECTION, [
-            Query.greaterThanEqual("amount_paid", TARGET_FEE),
-            Query.limit(1) // We just need the 'total'
+            Query.greaterThanEqual("amount_paid", TARGET_FEE)
         ]);
         
         const genderPaid = await databases.listDocuments(process.env.DATABASE_ID, process.env.CAMPERS_COLLECTION, [
             Query.equal("gender", camper.gender),
-            Query.greaterThanEqual("amount_paid", TARGET_FEE),
-            Query.limit(1)
+            Query.greaterThanEqual("amount_paid", TARGET_FEE)
         ]);
 
         updatePayload.team = TEAMS[globalPaid.total % TEAMS.length];
         updatePayload.bus_no = BUSES[globalPaid.total % BUSES.length];
         
         const prefix = camper.gender === "Male" ? "M" : "F";
-        // Bed Number is count of gender-specific paid campers + 1
+        // Bed Number based on order of full payment
         updatePayload.bed_no = `${prefix}-${(genderPaid.total + 1).toString().padStart(3, '0')}`;
     }
 
-    // 5. UPDATE DATABASE (Atomic-like update)
+    // --- 6. ATOMIC UPDATES ---
+    // Update the Camper Document
     await databases.updateDocument(process.env.DATABASE_ID, process.env.CAMPERS_COLLECTION, camperId, updatePayload);
 
-    // 6. RECORD THE TRANSACTION (Final checkmark)
+    // Create the Payment Record (recording the NET amount for clean books)
     await databases.createDocument(process.env.DATABASE_ID, process.env.PAYMENTS_COLLECTION, ID.unique(), {
         camperId: camperId,
-        amount: rawAmount,
+        amount: netAmountDrops, // Storing what actually dropped in the bank
         reference: reference,
         date: new Date().toISOString()
     });
 
-    log(`Success: ${camper.name} paid ${rawAmount}. Total: ${newBalance}`);
+    log(`Success: ${camper.name} credited with Net: ₦${netAmountDrops}. New Balance: ₦${newBalance}`);
+    
     return res.json({ success: true, data: updatePayload });
 
   } catch (err) {
