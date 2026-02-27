@@ -68,7 +68,7 @@ export default async function ({ req, res, log, error }) {
     // 6. LOG TRANSACTION (Record the net amount received)
     await databases.createDocument(process.env.DATABASE_ID, process.env.PAYMENTS_COLLECTION, ID.unique(), {
         camperId: camperId,
-        amount: netAmount.toString(), 
+        amount: netAmount, 
         reference: reference,
         // Ensure your collection has a 'date' or '$createdAt' field
         date: new Date().toISOString() 
