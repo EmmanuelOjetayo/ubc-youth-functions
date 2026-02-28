@@ -14,9 +14,41 @@ export default async function ({ req, res, log, error }) {
 
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-    const { reference, camperId } = body;
+    
+    // 1. DATA DETECTION (The Switch)
+    let reference, camperId;
 
-    // 1. VERIFY WITH PAYSTACK
+    if (body.event === 'charge.success') {
+      // Logic for PAYSTACK WEBHOOK
+      reference = body.data.reference;
+      // Pulling the camper_id we hid in the metadata custom_fields
+      const metadata = body.data.metadata?.custom_fields || [];
+      camperId = metadata.find(f => f.variable_name === 'camper_id')?.value;
+      log(`WEBHOOK TRIGGERED: Ref ${reference} for Camper ${camperId}`);
+    } else {
+      // Logic for MANUAL FRONTEND CALL
+      reference = body.reference;
+      camperId = body.camperId;
+      log(`MANUAL TRIGGERED: Ref ${reference} for Camper ${camperId}`);
+    }
+
+    if (!reference || !camperId) {
+      return res.json({ success: false, message: "Missing Reference or Camper ID" });
+    }
+
+    // 2. IDEMPOTENCY CHECK (Safety Net)
+    // Don't process the same reference twice if Webhook and Manual hit together
+    const existing = await databases.listDocuments(
+      process.env.DATABASE_ID, 
+      process.env.PAYMENTS_COLLECTION, 
+      [Query.equal('reference', reference)]
+    );
+
+    if (existing.total > 0) {
+      return res.json({ success: true, message: "Transaction already processed" });
+    }
+
+    // 3. VERIFY WITH PAYSTACK (Official Proof)
     const paystackRes = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
       headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` }
     });
@@ -26,15 +58,11 @@ export default async function ({ req, res, log, error }) {
       return res.json({ success: false, message: "Payment verification failed" });
     }
 
-    // 2. UPDATED REVENUE LOGIC: Deduct Fees
-    // amount = what user paid | fees = what Paystack charged
-    // We calculate the NET amount to add to their wallet balance
+    // 4. NET REVENUE CALCULATION
     const netAmount = (paystackData.data.amount - paystackData.data.fees) / 100;
 
-    // 3. FETCH CAMPER
+    // 5. FETCH & UPDATE CAMPER
     const camper = await databases.getDocument(process.env.DATABASE_ID, process.env.CAMPERS_COLLECTION, camperId);
-    
-    // Use the netAmount here so the camper only gets credited for the "Deposit" part
     const newBalance = parseFloat(camper.amount_paid || 0) + netAmount;
 
     let updatePayload = {
@@ -42,11 +70,11 @@ export default async function ({ req, res, log, error }) {
         status: newBalance >= TARGET_FEE ? 'paid' : 'pending'
     };
 
-    // 4. STRICT GENDER-BASED BED SORTING (Only if they just hit the target)
+    // 6. LOGISTICS ASSIGNMENT (Gender-Based)
     if (newBalance >= TARGET_FEE && !camper.team) {
         const globalPaid = await databases.listDocuments(process.env.DATABASE_ID, process.env.CAMPERS_COLLECTION, [
             Query.notEqual("team", ""),
-            Query.limit(1) // We only need the total count
+            Query.limit(1)
         ]);
         
         const genderPaid = await databases.listDocuments(process.env.DATABASE_ID, process.env.CAMPERS_COLLECTION, [
@@ -62,19 +90,17 @@ export default async function ({ req, res, log, error }) {
         updatePayload.bed_no = `${prefix}-${(genderPaid.total + 1).toString().padStart(3, '0')}`;
     }
 
-    // 5. UPDATE DATABASE
+    // 7. EXECUTE DATABASE UPDATES
     await databases.updateDocument(process.env.DATABASE_ID, process.env.CAMPERS_COLLECTION, camperId, updatePayload);
 
-    // 6. LOG TRANSACTION (Record the net amount received)
     await databases.createDocument(process.env.DATABASE_ID, process.env.PAYMENTS_COLLECTION, ID.unique(), {
         camperId: camperId,
-        amount: netAmount, 
+        amount: netAmount,
         reference: reference,
-        // Ensure your collection has a 'date' or '$createdAt' field
         date: new Date().toISOString() 
     });
 
-    return res.json({ success: true, data: updatePayload, credited: netAmount });
+    return res.json({ success: true, message: "Wallet Synced", credited: netAmount });
 
   } catch (err) {
     error(err.message);
