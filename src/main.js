@@ -15,53 +15,64 @@ export default async function ({ req, res, log, error }) {
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     
-    // 1. DATA DETECTION (The Switch)
-    let reference, camperId;
+    // --- 1. FLUTTERWAVE SECURITY CHECK ---
+    // If it's a webhook, verify the secret hash you set in the FLW dashboard
+    const secretHash = process.env.FLW_SECRET_HASH;
+    const signature = req.headers['verif-hash'];
 
-    if (body.event === 'charge.success') {
-      // Logic for PAYSTACK WEBHOOK
-      reference = body.data.reference;
-      // Pulling the camper_id we hid in the metadata custom_fields
-      const metadata = body.data.metadata?.custom_fields || [];
-      camperId = metadata.find(f => f.variable_name === 'camper_id')?.value;
-      log(`WEBHOOK TRIGGERED: Ref ${reference} for Camper ${camperId}`);
+    // --- 2. DATA DETECTION (The Switch) ---
+    let transactionId, camperId, txRef;
+
+    // Webhook detection
+    if (signature && signature === secretHash) {
+      transactionId = body.id; // Flutterwave ID
+      txRef = body.tx_ref;
+      // Backup: Try to get camperId from meta or from the tx_ref string we built
+      camperId = body.meta?.camper_id || txRef.split('-')[1];
+      log(`WEBHOOK: Validated ${txRef} for Camper ${camperId}`);
     } else {
-      // Logic for MANUAL FRONTEND CALL
-      reference = body.reference;
-      camperId = body.camperId;
-      log(`MANUAL TRIGGERED: Ref ${reference} for Camper ${camperId}`);
+      // Manual/Frontend call detection
+      transactionId = body.transaction_id;
+      txRef = body.tx_ref;
+      camperId = body.camperId || txRef?.split('-')[1];
+      log(`MANUAL: Processing ${txRef} for Camper ${camperId}`);
     }
 
-    if (!reference || !camperId) {
-      return res.json({ success: false, message: "Missing Reference or Camper ID" });
+    if (!transactionId || !camperId) {
+      return res.json({ success: false, message: "Missing Transaction ID or Camper ID" });
     }
 
-    // 2. IDEMPOTENCY CHECK (Safety Net)
-    // Don't process the same reference twice if Webhook and Manual hit together
+    // --- 3. IDEMPOTENCY CHECK ---
     const existing = await databases.listDocuments(
       process.env.DATABASE_ID, 
       process.env.PAYMENTS_COLLECTION, 
-      [Query.equal('reference', reference)]
+      [Query.equal('reference', txRef)]
     );
 
     if (existing.total > 0) {
-      return res.json({ success: true, message: "Transaction already processed" });
+      return res.json({ success: true, message: "Transaction already synced" });
     }
 
-    // 3. VERIFY WITH PAYSTACK (Official Proof)
-    const paystackRes = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
-      headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` }
+    // --- 4. VERIFY WITH FLUTTERWAVE (Server-to-Server) ---
+    const flwRes = await fetch(`https://api.flutterwave.com/v3/transactions/${transactionId}/verify`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${process.env.FLW_SECRET_KEY}`,
+        'Content-Type': 'application/json'
+      }
     });
-    const paystackData = await paystackRes.json();
 
-    if (!paystackData.status || paystackData.data.status !== 'success') {
-      return res.json({ success: false, message: "Payment verification failed" });
+    const flwData = await flwRes.json();
+
+    if (flwData.status !== 'success' || flwData.data.status !== 'successful') {
+      return res.json({ success: false, message: "Flutterwave verification failed" });
     }
 
-    // 4. NET REVENUE CALCULATION
-    const netAmount = (paystackData.data.amount - paystackData.data.fees) / 100;
+    // --- 5. AMOUNT CALCULATION ---
+    // Flutterwave amount is already in Naira
+    const netAmount = parseFloat(flwData.data.amount);
 
-    // 5. FETCH & UPDATE CAMPER
+    // --- 6. FETCH & UPDATE CAMPER ---
     const camper = await databases.getDocument(process.env.DATABASE_ID, process.env.CAMPERS_COLLECTION, camperId);
     const newBalance = parseFloat(camper.amount_paid || 0) + netAmount;
 
@@ -70,7 +81,7 @@ export default async function ({ req, res, log, error }) {
         status: newBalance >= TARGET_FEE ? 'paid' : 'pending'
     };
 
-    // 6. LOGISTICS ASSIGNMENT (Gender-Based)
+    // --- 7. LOGISTICS ASSIGNMENT ---
     if (newBalance >= TARGET_FEE && !camper.team) {
         const globalPaid = await databases.listDocuments(process.env.DATABASE_ID, process.env.CAMPERS_COLLECTION, [
             Query.notEqual("team", ""),
@@ -90,13 +101,13 @@ export default async function ({ req, res, log, error }) {
         updatePayload.bed_no = `${prefix}-${(genderPaid.total + 1).toString().padStart(3, '0')}`;
     }
 
-    // 7. EXECUTE DATABASE UPDATES
+    // --- 8. EXECUTE DATABASE UPDATES ---
     await databases.updateDocument(process.env.DATABASE_ID, process.env.CAMPERS_COLLECTION, camperId, updatePayload);
 
     await databases.createDocument(process.env.DATABASE_ID, process.env.PAYMENTS_COLLECTION, ID.unique(), {
         camperId: camperId,
         amount: netAmount,
-        reference: reference,
+        reference: txRef,
         date: new Date().toISOString() 
     });
 
