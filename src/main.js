@@ -11,6 +11,7 @@ export default async function ({ req, res, log, error }) {
   const TEAMS = ["OPAJOBI", "ABIMBOLA", "ABIOLA", "UBC"];
   const BUSES = ["1", "2", "3", "4", "5"]; 
   const TARGET_FEE = 4000;
+  
 
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
@@ -63,6 +64,10 @@ export default async function ({ req, res, log, error }) {
     });
 
     const flwData = await flwRes.json();
+    
+    const grossAmount = parseFloat(flwData.data.amount);
+    const flwFee = parseFloat(flwData.data.app_fee || 0);
+
 
     if (flwData.status !== 'success' || flwData.data.status !== 'successful') {
       return res.json({ success: false, message: "Flutterwave verification failed" });
@@ -70,7 +75,7 @@ export default async function ({ req, res, log, error }) {
 
     // --- 5. AMOUNT CALCULATION ---
     // Flutterwave amount is already in Naira
-    const netAmount = parseFloat(flwData.data.amount);
+    const netAmount = parseFloat(grossAmount - flwFee);
 
     // --- 6. FETCH & UPDATE CAMPER ---
     const camper = await databases.getDocument(process.env.DATABASE_ID, process.env.CAMPERS_COLLECTION, camperId);
