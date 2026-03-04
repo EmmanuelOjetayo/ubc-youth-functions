@@ -10,7 +10,7 @@ export default async function ({ req, res, log, error }) {
 
   const TEAMS = ["OPAJOBI", "ABIMBOLA", "ABIOLA", "UBC"];
   const BUSES = ["1", "2", "3", "4", "5"]; 
-  const TARGET_FEE = 4000;
+  const TARGET_FEE = 5000;
   
 
   try {
