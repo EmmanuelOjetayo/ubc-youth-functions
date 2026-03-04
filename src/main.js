@@ -75,7 +75,7 @@ export default async function ({ req, res, log, error }) {
 
     // --- 5. AMOUNT CALCULATION ---
     // Flutterwave amount is already in Naira
-    const netAmount = parseFloat(grossAmount - flwFee);
+    const netAmount = Math.floor(parseFloat(grossAmount - flwFee));
 
     // --- 6. FETCH & UPDATE CAMPER ---
     const camper = await databases.getDocument(process.env.DATABASE_ID, process.env.CAMPERS_COLLECTION, camperId);
