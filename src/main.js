@@ -39,10 +39,16 @@ export default async function ({ req, res, log, error }) {
   
         log(`WEBHOOK: Validated ${txRef} for Camper ${camperId}`);
       } else {
-      // Manual/Frontend call detection
+      // MANUAL/FRONTEND PATH
       transactionId = body.transaction_id;
       txRef = body.tx_ref;
-      camperId = body.camperId || txRef?.split('-')[1];
+
+      // GUARD: Safe extraction for manual trigger
+      if (body.camperId) {
+        camperId = body.camperId;
+      } else if (txRef && typeof txRef === 'string' && txRef.includes('-')) {
+        camperId = txRef.split('-')[1];
+      }
       log(`MANUAL: Processing ${txRef} for Camper ${camperId}`);
     }
 
