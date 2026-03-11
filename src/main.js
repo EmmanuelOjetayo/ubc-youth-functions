@@ -26,12 +26,19 @@ export default async function ({ req, res, log, error }) {
 
     // Webhook detection
     if (signature && signature === secretHash) {
-      transactionId = body.id; // Flutterwave ID
-      txRef = body.tx_ref;
-      // Backup: Try to get camperId from meta or from the tx_ref string we built
-      camperId = body.meta?.camper_id || txRef.split('-')[1];
-      log(`WEBHOOK: Validated ${txRef} for Camper ${camperId}`);
-    } else {
+      transactionId = body.id || body.data?.id; // Flutterwave sometimes wraps in .data
+        txRef = body.tx_ref || body.data?.tx_ref;
+        
+        // GUARD: Secure extraction of camperId
+        // We check meta first (best practice), then fallback to splitting txRef safely
+        if (body.meta?.camper_id) {
+          camperId = body.meta.camper_id;
+        } else if (txRef && typeof txRef === 'string' && txRef.includes('-')) {
+          camperId = txRef.split('-')[1];
+        }
+  
+        log(`WEBHOOK: Validated ${txRef} for Camper ${camperId}`);
+      } else {
       // Manual/Frontend call detection
       transactionId = body.transaction_id;
       txRef = body.tx_ref;
@@ -39,7 +46,8 @@ export default async function ({ req, res, log, error }) {
       log(`MANUAL: Processing ${txRef} for Camper ${camperId}`);
     }
 
-    if (!transactionId || !camperId) {
+   if (!transactionId || !camperId) {
+      error(`Missing critical data. TX_REF: ${txRef}, CamperID: ${camperId}`);
       return res.json({ success: false, message: "Missing Transaction ID or Camper ID" });
     }
 
