@@ -55,13 +55,17 @@ export default async function ({ req, res, log, error }) {
     // ✅ Safe net amount with floor guard
     const grossAmount = parseFloat(flwData.data.amount || 0);
     const flwFee = parseFloat(flwData.data.app_fee || 0);
-    const netAmount = Math.max(Math.floor(grossAmount - flwFee), 0);
+    const netAmount = Number(
+  parseFloat(flwData.data.amount_settled || 0).toFixed(2)
+);
 
-    if (netAmount === 0) {
-      error(`[CRITICAL] netAmount is 0. Gross: ${grossAmount}, Fee: ${flwFee}`);
-      return res.json({ success: false, message: "Invalid net amount calculated" });
-    }
-
+if (netAmount <= 0) {
+  error(`[CRITICAL] Invalid settled amount: ${netAmount}`);
+  return res.json({
+    success: false,
+    message: "Invalid settlement amount"
+  });
+}
     // --- 3. IDEMPOTENCY LOCK (FLW TX ID as Document ID) ---
     try {
       await databases.createDocument(
