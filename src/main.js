@@ -55,9 +55,7 @@ export default async function ({ req, res, log, error }) {
     // ✅ Safe net amount with floor guard
     const grossAmount = parseFloat(flwData.data.amount || 0);
     const flwFee = parseFloat(flwData.data.app_fee || 0);
-    const netAmount = Number(
-  parseFloat(flwData.data.amount_settled || 0).toFixed(2)
-);
+    const netAmount = Math.floor(parseFloat(flwData.data.amount_settled || 0) / 100) * 100;
 
 if (netAmount <= 0) {
   error(`[CRITICAL] Invalid settled amount: ${netAmount}`);
