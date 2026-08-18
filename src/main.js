@@ -9,7 +9,7 @@ export default async function ({ req, res, log, error }) {
   const databases = new Databases(client);
 
   const TEAMS = ["KETER", "KAVOD", "KISSEH", "KLIRONOMOS", "ARMON", "SHARBIT", "MALCHUT", "MEMSHALAH"];
-  const BUSES = ["1", "2", "3", "4", "5"]
+  const BUSES = ["1", "2", "3", "4", "5"];
   const TARGET_FEE = 5000; // ✅ Matches frontend
 
   try {
